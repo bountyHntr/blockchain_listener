@@ -33,6 +33,7 @@ const (
 	closed
 )
 
+// Wrapper for managing subscriptions to blockchain events.
 type Subscription struct {
 	url   string
 	state atomic.Int32
@@ -56,10 +57,11 @@ func New(url string) (*Subscription, error) {
 	return &s, nil
 }
 
+// Restores the connection of underlying RPC client.
 func (s *Subscription) Reconnect() error {
-	errActive := s.isActive()
-	if errActive != nil {
-		return errActive
+	err := s.isActive()
+	if err != nil {
+		return err
 	}
 
 	s.setState(reconnecting)
@@ -77,29 +79,40 @@ func (s *Subscription) Reconnect() error {
 			s.rpc, err = rpc.DialContext(ctx, s.url)
 			cancel()
 
-			if err != nil {
-				time.Sleep(reconnectInterval)
-				reconnectInterval = Max(2*reconnectInterval, maxReconnectInterval)
-				continue
+			if err == nil {
+				s.setState(active)
+				return
 			}
 
-			s.setState(active)
-			return
+			time.Sleep(reconnectInterval)
+			reconnectInterval = Max(2*reconnectInterval, maxReconnectInterval)
 		}
 	}()
 
 	return nil
 }
 
-func (s *Subscription) WaitActivation() {
-	for {
-		err := s.isActive()
-		if err == nil {
-			return
-		}
+type VoidType struct{}
 
-		time.Sleep(defaultReconnectInterval)
-	}
+var Void = VoidType{}
+
+// Waiting for the RPC client to reconnect.
+func (s *Subscription) WaitActivation() chan VoidType {
+	ch := make(chan VoidType)
+
+	go func() {
+		for {
+			err := s.isActive()
+			if err == nil {
+				ch <- Void
+				return
+			}
+
+			time.Sleep(defaultReconnectInterval)
+		}
+	}()
+
+	return ch
 }
 
 func (s *Subscription) SubscribeFilterLogs(q ethereum.FilterQuery, ch chan<- types.Log) (ethereum.Subscription, error) {
@@ -118,13 +131,24 @@ func (s *Subscription) SubscribePendingTx(ch chan<- common.Hash) (ethereum.Subsc
 	return s.subscribe(ch, "newPendingTransactions")
 }
 
+func (s *Subscription) SubscribeFullPendingTx(ch chan<- *types.Transaction) (ethereum.Subscription, error) {
+	return s.subscribe(ch, "newPendingTransactions", true)
+}
+
+func (s *Subscription) SubscribeNewBlocks(ch chan<- *types.Block) (ethereum.Subscription, error) {
+	return s.subscribe(ch, "newBlocks")
+}
+
 func (s *Subscription) Close() {
 	if s.isClosed() {
 		return
 	}
 
 	s.setState(closed)
-	s.rpc.Close()
+
+	if s.rpc != nil {
+		s.rpc.Close()
+	}
 }
 
 func (s *Subscription) subscribe(channel interface{}, args ...interface{}) (ethereum.Subscription, error) {

@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 func main() {
@@ -26,21 +26,24 @@ func main() {
 
 	log.Println("wait events")
 
-	ch := make(chan common.Hash, 256)
+	ch := make(chan *types.Block, 256)
 
 	for {
-		sub, err := ethSub.SubscribePendingTx(ch)
-
+		sub, err := ethSub.SubscribeNewBlocks(ch)
 		if err != nil {
 			log.Println("failed to subscribe:", err)
-			processSubscriptionError(ethSub)
+
+			exit := processSubscriptionError(ethSub, exitChan)
+			if exit {
+				return
+			}
+
 			continue
 		}
 
 		exit := waitEvent(ch, sub.Err(), exitChan)
 		sub.Unsubscribe()
 		if exit {
-			log.Println("exit")
 			return
 		}
 	}
@@ -57,14 +60,19 @@ func url() string {
 	return url
 }
 
-func processSubscriptionError(sub *subscription.Subscription) {
+func processSubscriptionError(sub *subscription.Subscription, exitCh <-chan os.Signal) (exit bool) {
 
 	err := sub.Reconnect()
 	if errors.Is(err, subscription.ErrClosed) {
 		log.Println("trying to reconnect:", err)
 	}
 
-	sub.WaitActivation()
+	select {
+	case <-sub.WaitActivation():
+		return false
+	case <-exitCh:
+		return true
+	}
 }
 
 func waitEvent[T any](eventsCh <-chan T, errorsCh <-chan error, exitCh <-chan os.Signal) (exit bool) {
